@@ -6,7 +6,6 @@ library(tidyverse)
 library(ggplot2)
 library(Matrix)
 library(tidyr)
-library(ggplot2)
 
 
 soft_threshold <- function(X, tau) {
@@ -314,6 +313,7 @@ admm_l1_matrix <- function(Sigma0, Sigma, lambda, rho = 1.0, max_iters = 3000,
   
   list(C = C, Z = Z, U = U, history = history, iters = length(history))
 }
+
 
 
 
