@@ -157,7 +157,6 @@ rho<-1
 n=100000
 
 set.seed(2023)
-p <- sum(pp)
 pp1=pp[1];pp2=pp[2];pp3=pp[3]
 u1 <- matrix(0, pp[1],r);
 u2 <- matrix(0, pp[2],r);
@@ -312,6 +311,7 @@ admm_l1_matrix <- function(Sigma0, Sigma, lambda, rho = 1.0, max_iters = 3000,
   
   list(C = C, Z = Z, U = U, history = history, iters = length(history))
 }
+
 
 
 
