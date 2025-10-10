@@ -202,7 +202,6 @@ rho<-1
 n=100000
 
 set.seed(2023)
-p <- sum(pp)
 pp1=pp[1];pp2=pp[2];pp3=pp[3]
 u1 <- matrix(0, pp[1],r);
 u2 <- matrix(0, pp[2],r);
@@ -270,6 +269,7 @@ fit_admm_GT <- admm_sgca(Sigma0, Sigma, 0, r,
                              adapt_rho = FALSE, mu = 10, tau_incr = 2, tau_decr = 2,
                              sparsity_threshold = 1e-4,
                              verbose = TRUE)
+
 
 
 
