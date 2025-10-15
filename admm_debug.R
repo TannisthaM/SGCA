@@ -1,3 +1,67 @@
+library(MASS)
+library(stats)
+library(pracma)
+library(tidyverse)
+library(ggplot2)
+library(Matrix)
+library(tidyr)
+
+matmul <- function(A, B) {
+  if (requireNamespace("SMUT", quietly = TRUE)) {
+    SMUT::eigenMapMatMult(A, B)
+  } else {
+    A %*% B
+  }
+}
+
+soft_threshold <- function(X, T) {
+  # T can be scalar or same shape as X
+  sign(X) * pmax(abs(X) - T, 0)
+}
+
+sym_inv_sqrt <- function(S, eps = 1e-10) {
+  S <- (S + t(S))/2
+  ee <- eigen(S, symmetric = TRUE)
+  vals <- pmax(ee$values, eps)
+  V <- ee$vectors
+  matmul(matmul(V, diag(1/sqrt(vals), nrow = length(vals))), t(V))
+}
+
+top_eigs_sym <- function(A, r) {
+  A <- (A + t(A))/2
+  if (requireNamespace("RSpectra", quietly = TRUE) && r < nrow(A)) {
+    out <- RSpectra::eigs_sym(A, k = r, which = "LM")
+    list(values = Re(out$values), vectors = Re(out$vectors))
+  } else {
+    ev <- eigen(A, symmetric = TRUE)
+    list(values = ev$values[seq_len(r)], vectors = ev$vectors[, seq_len(r), drop = FALSE])
+  }
+}
+
+.block_indices <- function(plist) {
+  edges <- c(0, cumsum(plist))
+  lapply(seq_along(plist), function(i) (edges[i] + 1):edges[i + 1])
+}
+
+
+# Allow passing S plus optional S0 (otherwise derive S0 by copying diagonal blocks)
+.build_sigma_pair <- function(S, plist, S0 = NULL) {
+  S <- (S + t(S)) / 2
+  ptot <- nrow(S)
+  stopifnot(sum(plist) == ptot)
+  
+  if (is.null(S0)) {
+    S0 <- matrix(0, ptot, ptot)
+    idxs <- .block_indices(plist)
+    for (idx in idxs) S0[idx, idx] <- S[idx, idx]
+  } else {
+    S0 <- (S0 + t(S0)) / 2
+  }
+  list(Sigma = S, Sigma0 = S0)
+}
+
+
+
 admm_sgca <- function(Sigma, Sigma0, lambda, r,
                       rho = 1,
                       p_list = NULL,
@@ -68,7 +132,13 @@ admm_sgca <- function(Sigma, Sigma0, lambda, r,
     rhs_tilde <- rho * matmul(t(U0), matmul(Z - U, U0)) + const_rhs
     C_tilde <- rhs_tilde / denom
     C <- matmul(U0, matmul(C_tilde, t(U0)))
-    
+    debug <- TRUE
+    debug_every <- 1L   # break every iteration (or set 50, 100, etc.)
+    if (debug && (iter %% debug_every == 0 ||
+                  any(!is.finite(C)) || any(!is.finite(Z)) ||
+                  r_norm > 1e6 || is.na(r_norm) || is.na(s_norm))) {
+      browser()  # inspect C, Z, U, denom, etc.
+    }
     # ----- Z update (prox) -----
     Z_tilde <- C + U
     if (penalty == "l1") {
@@ -143,3 +213,96 @@ admm_sgca <- function(Sigma, Sigma0, lambda, r,
     n_iter = n_iter
   )
 }
+
+
+###SIMULATION EXAMPLE################################################3
+
+pp <- c(10,10,10);
+p <- sum(pp)
+s  <- c(1:3);
+r <- 1;
+rho<-1
+
+n=100000
+
+set.seed(2023)
+p <- sum(pp)
+pp1=pp[1];pp2=pp[2];pp3=pp[3]
+u1 <- matrix(0, pp[1],r);
+u2 <- matrix(0, pp[2],r);
+u3 <- matrix(0, pp[3],r);
+
+# Generate Sigma and Sigma0
+Sigma = diag(sum(pp));
+T1 = toeplitz(0.5^(0:(pp[1]-1)));
+T2 = toeplitz(0.7^(0:(pp[2]-1)));
+T3 = toeplitz(0.9^(0:(pp[3]-1)));
+u1[s,1:r] <- matrix( rnorm(length(s)*r,mean=0,sd=1), length(s), r)
+u1 <- u1 %*%(pracma::sqrtm(t(u1[s,1:r]) %*% T1[s,s] %*% u1[s,1:r])$Binv);
+u2[s,1:r] = matrix(rnorm(length(s)*r,mean=0,sd=1), length(s), r) 
+u2 <- u2 %*% (pracma::sqrtm(t(u2[s,1:r]) %*% T2[s,s] %*% u2[s,1:r])$Binv);
+u3[s,1:r] = matrix( rnorm(length(s)*r,mean=0,sd=1), length(s), r) 
+u3 <- u3 %*%(pracma::sqrtm(t(u3[s,1:r]) %*% T3[s,s] %*% u3[s,1:r])$Binv);
+
+idx1 = 1:pp[1];
+idx2 = (pp[1]+1):(pp[1]+pp[2]);
+idx3 = (pp[1]+pp[2]+1):(pp[1]+pp[2]+pp[3]);
+Sigma[idx1, idx1] = T1;
+Sigma[idx2, idx2] = T2;
+Sigma[idx3, idx3] = T3;
+
+
+SigmaD = Sigma;
+
+Sigma[idx1, idx2] <-T1 %*% u1 %*% t(u2) %*% T2;
+Sigma[idx1, idx3] <-T1 %*% u1 %*% t(u3) %*% T3;
+Sigma[idx2, idx3] <-T2 %*% u2 %*% t(u3) %*% T3;
+Sigma = Sigma + t(Sigma) - SigmaD+diag(p);
+
+
+
+
+
+Mask = matrix(0, sum(pp),sum(pp));
+Mask[idx1,idx1] <- matrix(1,pp[1],pp[1]);
+Mask[idx2,idx2] <- matrix(1,pp[2],pp[2]);
+Mask[idx3,idx3] <- matrix(1,pp[3],pp[3]);
+Sigma0 = Sigma * Mask;
+
+###############checking if sigma and sigma0 are pd###########################33
+
+Sigma_svd=svd(Sigma)
+Sigma_svd$d
+Sigma0_svd=svd(Sigma0)
+Sigma0_svd$d
+
+#############################################################################3
+
+X <-mvrnorm(n, rep(0, p) , Sigma)
+S <- t(X)%*% X / n
+sigma0hat <- S * Mask
+C_0 <- solve(Sigma0) %*% Sigma %*% solve(Sigma0)
+
+fit_admm_oracle <- admm_sgca(S, sigma0hat, 0, r,
+                             rho = 1,
+                             p_list = pp,
+                             penalty = c("l1"),
+                             penalize = c("all"),   # used for l1 and l21_rows
+                             
+                             max_iter = 1,
+                             abs_tol = 1e-18, rel_tol = 1e-17,
+                             adapt_rho = FALSE, mu = 10, tau_incr = 2, tau_decr = 2,
+                             sparsity_threshold = 1e-4,
+                             verbose = TRUE)
+
+fit_admm_GT <- admm_sgca(Sigma0, Sigma, 0, r,
+                         rho = 1,
+                         p_list = pp,
+                         penalty = c("l1"),
+                         penalize = c("all"),   # used for l1 and l21_rows
+                         
+                         max_iter = 1,
+                         abs_tol = 1e-18, rel_tol = 1e-17,
+                         adapt_rho = FALSE, mu = 10, tau_incr = 2, tau_decr = 2,
+                         sparsity_threshold = 1e-4,
+                         verbose = TRUE)
