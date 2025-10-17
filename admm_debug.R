@@ -295,7 +295,7 @@ fit_admm_oracle <- admm_sgca(S, sigma0hat, 0, r,
                              sparsity_threshold = 1e-4,
                              verbose = TRUE)
 
-fit_admm_GT <- admm_sgca(Sigma0, Sigma, 0, r,
+fit_admm_GT <- admm_sgca(Sigma, Sigma0, 0, r,
                          rho = 1,
                          p_list = pp,
                          penalty = c("l1"),
@@ -306,3 +306,4 @@ fit_admm_GT <- admm_sgca(Sigma0, Sigma, 0, r,
                          adapt_rho = FALSE, mu = 10, tau_incr = 2, tau_decr = 2,
                          sparsity_threshold = 1e-4,
                          verbose = TRUE)
+
