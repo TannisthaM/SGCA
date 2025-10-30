@@ -281,13 +281,11 @@ admm_sgca <- function(Sigma, Sigma0, lambda, r,
   
   # Step 2: eigenvectors of Σ0^{1/2} C Σ0^{1/2}
   Sigma0_sqrt <- matmul(U0, matmul(diag(sqrt(lam2), nrow = length(lam2)), t(U0)))
-  target <- matmul(Sigma0_sqrt, matmul(C, Sigma0_sqrt))
-  eU <- top_eigs_sym(target, r)
-  U_svd <- eU$vectors
+  SVD=svd(Sigma0_sqrt%*%C%*%Sigma0_sqrt)$u
+  lam_inv=diag(1/svd(Sigma0_sqrt%*%C%*%Sigma0_sqrt)$d)
+  U_canon=C%*%Sigma0_sqrt%*%SVD%*%lam_inv
   
-  # Step 3: normalization to enforce U^T Σ0 U = I
-  B <- matmul(t(U_svd), matmul(Sigma0, U_svd))
-  U_canon <- matmul(U_svd, sym_inv_sqrt(B))
+  
   
   n_iter <- iter  # number of iterations actually executed
   
@@ -302,6 +300,7 @@ admm_sgca <- function(Sigma, Sigma0, lambda, r,
     n_iter = n_iter
   )
 }
+
 
 
 # ---------- main: CV scoring by C ----------
@@ -423,10 +422,8 @@ pp <- c(10,10,10);
 p <- sum(pp)
 s  <- c(1:3);
 r <- 1;
-#k <- 20;
 
 p<-sum(pp)
-#n = 45;
 rho<-1
 
 lambda_values <- c(0, 1e-5,1e-4,1e-3,1e-2, 0.1, 1,10,100,1000,1e+4,1e+5)
