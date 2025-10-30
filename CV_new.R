@@ -348,7 +348,7 @@ admm_sgca <- function(Sigma, Sigma0, lambda, r,
   #A <- matmul(S0_sqrt, U_ref)
   #B <- matmul(S0_sqrt, U_hat_orth)
   #l <- subdistance(A, B)                  # ∈ [0, sqrt(2r)]
-  l <- subdistance(U_hat,U_ref)
+  l <- subdistance(U_hat_orth,U_ref)
   if (metric == "subdist") return(l)
   (l^2) / (2 * r)                         # ∈ [0,1]
 }
@@ -688,5 +688,6 @@ cvU <- cv_admm_sgca_U(
 
 cvU$lambda_min
 U_best <- cvU$fit_min$U 
+
 
 
