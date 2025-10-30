@@ -344,10 +344,11 @@ admm_sgca <- function(Sigma, Sigma0, lambda, r,
   }
   
   # Procrustes in Σ0_val metric: whiten to Euclidean orthonormal columns
-  S0_sqrt <- sym_sqrt(Sigma0_val)
-  A <- matmul(S0_sqrt, U_ref)
-  B <- matmul(S0_sqrt, U_hat_orth)
-  l <- subdistance(A, B)                  # ∈ [0, sqrt(2r)]
+  #S0_sqrt <- sym_sqrt(Sigma0_val)
+  #A <- matmul(S0_sqrt, U_ref)
+  #B <- matmul(S0_sqrt, U_hat_orth)
+  #l <- subdistance(A, B)                  # ∈ [0, sqrt(2r)]
+  l <- subdistance(U_hat,U_ref)
   if (metric == "subdist") return(l)
   (l^2) / (2 * r)                         # ∈ [0,1]
 }
@@ -678,7 +679,7 @@ p <- sum(p_list)
 
 
 cvU <- cv_admm_sgca_U(
-  X, p_list, lambdas, r = r,
+  X, p_list, lambda_values, r = r,
   penalty = "l1", penalize = "offdiag",
   metric = "subdist_rel",           # <- uses your subdistance()
   K = 5, seed = 1,
@@ -687,4 +688,5 @@ cvU <- cv_admm_sgca_U(
 
 cvU$lambda_min
 U_best <- cvU$fit_min$U 
+
 
