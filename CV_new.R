@@ -869,8 +869,7 @@ cvC <- cv_admm_sgca_C(
         verbose = TRUE
       )
 
-cvU$lambda_min
-U_best <- cvU$fit_min$U 
+
 
 
 
