@@ -6,6 +6,11 @@ library(tidyverse)
 library(ggplot2)
 library(Matrix)
 library(tidyr)
+library(geigen)
+library(dplyr)
+library(expm)
+library(foreach)
+library(doParallel)
 
 ##########################base ADMM Function###################################################################
 
@@ -438,6 +443,7 @@ cv_admm_sgca_C <- function(
   class(out) <- "cv_admm_sgca_C"
   out
 }
+
 
 
 
