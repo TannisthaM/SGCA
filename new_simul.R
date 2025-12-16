@@ -1184,8 +1184,8 @@ for(experiment in 1:50){
           X, p_list, lambdas = lambda_values, r = 1, K = 5,
           penalty = "l1", penalize = "all", loss_part = "all", relative_loss = TRUE,
           rho = 1, max_iter = 200, adapt_rho = TRUE,   # used only if admm_sgca supports them
-          parallel = TRUE, nb_cores = 1, blas_threads = 1,
-          verbose = TRUE
+          parallel = TRUE, nb_cores = 5, blas_threads = 1,
+          verbose = FALSE
         )
         end_time <- proc.time()
         admm$cv[j] <- (end_time-start_time)[3]  # Store NA for failed iterations
@@ -1283,5 +1283,6 @@ for(experiment in 1:50){
                              oracle1=oracle,oracle2=oracle2,naive=naive)
   print(experiment)
 }
+
 
 
