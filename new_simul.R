@@ -1112,7 +1112,6 @@ for(experiment in 1:50){
         start_time <- proc.time()
         output <- rgcca(
           blocks     = blocks,
-          connection = C_rgcca,
           tau        = "optimal",        # automatic shrinkage per block :contentReference[oaicite:0]{index=0}
           ncomp      = c(2, 2, 2),       # 2 components per block
           scheme     = "factorial",      # default scheme
@@ -1150,7 +1149,6 @@ for(experiment in 1:50){
         start_time <- proc.time()
         output <- rgcca(
           blocks     = blocks,
-          connection = C_rgcca,
           tau        = "optimal",        # automatic shrinkage per block :contentReference[oaicite:0]{index=0}
           ncomp      = c(2, 2, 2),       # 2 components per block
           scheme     = "factorial",      # default scheme
@@ -1186,7 +1184,7 @@ for(experiment in 1:50){
           X, p_list, lambdas = lambda_values, r = 1, K = 5,
           penalty = "l1", penalize = "all", loss_part = "all", relative_loss = TRUE,
           rho = 1, max_iter = 200, adapt_rho = TRUE,   # used only if admm_sgca supports them
-          parallel = TRUE, nb_cores = 5, blas_threads = 1,
+          parallel = TRUE, nb_cores = 1, blas_threads = 1,
           verbose = TRUE
         )
         end_time <- proc.time()
@@ -1285,4 +1283,5 @@ for(experiment in 1:50){
                              oracle1=oracle,oracle2=oracle2,naive=naive)
   print(experiment)
 }
+
 
