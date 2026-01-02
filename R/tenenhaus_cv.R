@@ -9,6 +9,7 @@ library(geigen)
 library(RGCCA)
 library(dplyr)
 library(expm)
+library(future.apply)
 library(foreach)
 library(doParallel)
 
@@ -58,6 +59,21 @@ rgcca_unsupervised_cv_tau <- function(
   }
   block_names <- names(blocks)
   
+  # Force matrices + assign unique colnames per block
+  blocks <- lapply(seq_along(blocks), function(j) {
+    nm <- names(blocks)[j]
+    B  <- as.matrix(blocks[[j]])
+  
+    if (is.null(colnames(B))) {
+      colnames(B) <- paste0(nm, "_V", seq_len(ncol(B)))
+    } else {
+      # still make them unique + prefixed to avoid cross-block duplicates
+      colnames(B) <- paste0(nm, "_", make.unique(colnames(B)))
+    }
+  
+    B
+  })
+
   J <- length(blocks)
   n <- nrow(blocks[[1]])
   if (is.null(connection)) connection <- 1 - diag(J)
@@ -69,47 +85,57 @@ rgcca_unsupervised_cv_tau <- function(
   on.exit(future::plan(old_plan), add = TRUE)
   future::plan(future::multisession, workers = n_cores)
   
-  fold_scores <- future_lapply(seq_len(kfold), function(f) {
-    tr <- which(fold_id != f)
-    te <- which(fold_id == f)
-    
-    train_blocks <- lapply(blocks, function(B) B[tr, , drop = FALSE])
-    test_blocks  <- lapply(blocks, function(B) B[te, , drop = FALSE])
-    
-    # ---- PRESERVE NAMES (this fixes your error) ----
-    names(train_blocks) <- block_names
-    names(test_blocks)  <- block_names
-    
-    sapply(lambda_values, function(tau_scalar) {
-      tau_vec <- rep(tau_scalar, J)
+  fold_scores <- future.apply::future_lapply(
+    seq_len(kfold),
+    function(f) {
+      tr <- which(fold_id != f)
+      te <- which(fold_id == f)
       
-      fit <- tryCatch(
-        rgcca(
-          blocks = train_blocks,
-          connection = connection,
-          method = "rgcca",
-          tau = tau_vec,
-          ncomp = ncomp,
-          scheme = scheme,
-          scale = scale,
-          scale_block = scale_block,
-          bias = bias,
-          verbose = FALSE
-        ),
-        error = function(e) NULL
-      )
-      if (is.null(fit)) return(NA_real_)
+      train_blocks <- lapply(blocks, function(B) B[tr, , drop = FALSE])
+      test_blocks  <- lapply(blocks, function(B) B[te, , drop = FALSE])
       
-      trans <- tryCatch(rgcca_transform(fit, blocks_test = test_blocks),
-                        error = function(e) NULL)
-      if (is.null(trans)) return(NA_real_)
+      names(train_blocks) <- block_names
+      names(test_blocks)  <- block_names
       
-      # rgcca_transform() may return either list-of-Y or an object containing $Y
-      Y_test <- if (!is.null(trans$Y)) trans$Y else trans
-      
-      rgcca_holdout_score(Y_test, connection = connection, scheme = scheme, bias = bias, comp = 1)
-    })
-  }, future.seed = TRUE)
+      sapply(lambda_values, function(tau_scalar) {
+        tau_vec <- rep(tau_scalar, J)
+        
+        fit <- tryCatch(
+          RGCCA::rgcca(
+            blocks = train_blocks,
+            connection = connection,
+            method = "rgcca",
+            tau = tau_vec,
+            ncomp = ncomp,
+            scheme = scheme,
+            scale = scale,
+            scale_block = scale_block,
+            bias = bias,
+            verbose = FALSE
+          ),
+          error = function(e) {
+            message("rgcca() failed: fold=", f, " tau=", tau_scalar, " :: ", conditionMessage(e))
+            NULL
+          }
+        )
+        if (is.null(fit)) return(NA_real_)
+        
+        trans <- tryCatch(
+          RGCCA::rgcca_transform(fit, blocks_test = test_blocks),
+          error = function(e) {
+            message("rgcca_transform() failed: fold=", f, " tau=", tau_scalar, " :: ", conditionMessage(e))
+            NULL
+          }
+        )
+        if (is.null(trans)) return(NA_real_)
+        
+        # rgcca_transform() returns a list of projected blocks (no $Y needed)
+        rgcca_holdout_score(trans, connection = connection, scheme = scheme, bias = bias, comp = 1)
+      })
+    },
+    future.seed = TRUE,
+    future.packages = c("RGCCA")   # crucial for multisession workers
+  )
   
   score_mat <- do.call(rbind, fold_scores)  # kfold x length(lambda_values)
   cv_mean <- colMeans(score_mat, na.rm = TRUE)

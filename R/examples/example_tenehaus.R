@@ -1,4 +1,4 @@
-
+library(tidyverse)
 # IMPORTANT: blocks MUST be a named list
 source("R/tenenhaus_cv.R")
 
@@ -52,6 +52,10 @@ Mask[idx2,idx2] <- matrix(1,pp[2],pp[2]);
 Mask[idx3,idx3] <- matrix(1,pp[3],pp[3]);
 Sigma0 = Sigma * Mask;
 
+
+
+heatmap(Sigma, Rowv=NA, Colv=NA)
+heatmap(Sigma0, Rowv=NA, Colv=NA)
 # Generate data for SGCA
 X <-mvrnorm(n, rep(0, p) , Sigma)
 S <- t(X)%*% X / n
@@ -65,8 +69,10 @@ blocks=list()
 blocks[[1]]=X[,idx1]
 blocks[[2]]=X[,idx2]
 blocks[[3]]=X[,idx3]
-                           
-lambda_values <- c(0, 0.1, 0.25, 0.5, 0.75, 1)
+# colnames(blocks[[1]]) <- sapply(1:ncol(blocks[[1]]), function(x){paste0("V1_", x)})    
+# colnames(blocks[[2]]) <- sapply(1:ncol(blocks[[2]]), function(x){paste0("V2_", x)}) 
+# colnames(blocks[[3]]) <- sapply(1:ncol(blocks[[3]]), function(x){paste0("V3_", x)})     
+lambda_values <- c(0, 0.001, 0.1, 0.25, 0.5, 0.75, 1)
 
 cv_unsup <- rgcca_unsupervised_cv_tau(
   blocks = blocks,
