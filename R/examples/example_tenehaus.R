@@ -160,11 +160,39 @@ U_init_hat  <- cv$U_full_init
 U_final_hat <- cv$U_full_final
 print(paste0("Error for ADMM is: ", sqrt(mean((cv$U_full_final- a_star)^2) )))
 
-fit_admm <- admm_sgca(Sigma, Sigma0, 0.0001, r,
+fit_admm <- admm_sgca(S, sigma0hat, 0.0001, r,
                       rho = 1,
+                      penalize = "all",
                       penalty = "l1")
-print(paste0("Error for ADMM is: ", sqrt(mean((fit_admm$U- a_star)^2) )))
 
+prep <- .admm_sgca_prepare(
+  Sigma = S,
+  Sigma0 = sigma0hat,
+  rho = 1,
+  p_list = pp,
+  penalty = "l1",
+  penalize = "all"
+)
+
+
+fit_admm2 <- .admm_sgca_run(prep,
+                            0.0001,
+                           r,
+                           init = NULL,
+                           warm_start = "none",
+                           max_iter = 4000,
+                           abs_tol = 1e-4,
+                           rel_tol = 1e-3,
+                           adapt_rho = FALSE,
+                           mu = 10,
+                           tau_incr = 2,
+                           tau_decr = 2,
+                           verbose = FALSE,
+                           compute_canon = TRUE)
+
+
+print(paste0("Error for ADMM is: ", sqrt(mean((fit_admm$U- a_star)^2) )))
+print(paste0("Error for ADMM is: ", sqrt(mean((fit_admm2$U- a_star)^2) )))
 
 fit_admm_cv <- sgcar_cv_folds(
     X,
