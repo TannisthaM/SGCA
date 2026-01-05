@@ -1,3 +1,105 @@
+library(MASS)
+library(stats)
+library(pracma)
+library(tidyverse)
+library(Matrix)
+library(tidyr)
+
+matmul <- function(A, B) {
+  if (requireNamespace("SMUT", quietly = TRUE)) {
+    SMUT::eigenMapMatMult(A, B)
+  } else {
+    A %*% B
+  }
+}
+
+soft_threshold <- function(X, T) {
+  # T can be scalar or same shape as X
+  sign(X) * pmax(abs(X) - T, 0)
+}
+
+sym_inv_sqrt <- function(S, eps = 1e-10) {
+  S <- (S + t(S))/2
+  ee <- eigen(S, symmetric = TRUE)
+  vals <- pmax(ee$values, eps)
+  V <- ee$vectors
+  matmul(matmul(V, diag(1/sqrt(vals), nrow = length(vals))), t(V))
+}
+
+top_eigs_sym <- function(A, r) {
+  A <- (A + t(A))/2
+  if (requireNamespace("RSpectra", quietly = TRUE) && r < nrow(A)) {
+    out <- RSpectra::eigs_sym(A, k = r, which = "LM")
+    list(values = Re(out$values), vectors = Re(out$vectors))
+  } else {
+    ev <- eigen(A, symmetric = TRUE)
+    list(values = ev$values[seq_len(r)], vectors = ev$vectors[, seq_len(r), drop = FALSE])
+  }
+}
+
+.block_indices <- function(plist) {
+  edges <- c(0, cumsum(plist))
+  lapply(seq_along(plist), function(i) (edges[i] + 1):edges[i + 1])
+}
+
+
+# Allow passing S plus optional S0 (otherwise derive S0 by copying diagonal blocks)
+.build_sigma_pair <- function(S, plist, S0 = NULL) {
+  S <- (S + t(S)) / 2
+  ptot <- nrow(S)
+  stopifnot(sum(plist) == ptot)
+  
+  if (is.null(S0)) {
+    S0 <- matrix(0, ptot, ptot)
+    idxs <- .block_indices(plist)
+    for (idx in idxs) S0[idx, idx] <- S[idx, idx]
+  } else {
+    S0 <- (S0 + t(S0)) / 2
+  }
+  list(Sigma = S, Sigma0 = S0)
+}
+
+## row/group proxes only used if you select penalties other than "l1"
+.prox_l21_rows <- function(X, tau, mask, row_weights) {
+  Z <- X
+  p <- nrow(X)
+  for (i in seq_len(p)) {
+    v <- X[i, ] * mask[i, ]
+    nrm <- sqrt(sum(v^2))
+    if (nrm > 0) {
+      shrink <- max(1 - (tau * row_weights[i]) / nrm, 0)
+      v <- v * shrink
+    }
+    Z[i, ] <- v + X[i, ] * (1 - mask[i, ])
+  }
+  (Z + t(Z))/2
+}
+
+.prox_l21_groups <- function(X, lambda_over_rho, groups_l21 = list(), group_weights = NULL) {
+  if (length(groups_l21) == 0) return(X)
+  if (is.null(group_weights)) group_weights <- rep(1, length(groups_l21))
+  Z <- X
+  for (g in seq_along(groups_l21)) {
+    idx <- groups_l21[[g]]
+    if (is.matrix(idx) && ncol(idx) == 2) {
+      vals <- X[cbind(idx[,1], idx[,2])]
+    } else {
+      vals <- X[idx]
+    }
+    nrm <- sqrt(sum(vals^2))
+    shrink <- if (nrm > 0) max(1 - lambda_over_rho * group_weights[g] / nrm, 0) else 0
+    if (is.matrix(idx) && ncol(idx) == 2) {
+      Z[cbind(idx[,1], idx[,2])] <- vals * shrink
+    } else {
+      Z[idx] <- vals * shrink
+    }
+  }
+  (Z + t(Z))/2
+}
+
+
+
+
 # sgcar_cv_folds_parallel.R
 # -------------------------------------------------------------------
 # Cross-validation for SGCar/SGCA ADMM solver, parallelized over folds.
@@ -100,46 +202,10 @@ setup_parallel_backend <- function(num_cores = NULL, verbose = FALSE) {
 }
 
 # Held-out loss: Frobenius norm of residual in the same objective used in training.
-.cv_loss_C <- function(C_hat, Sigma_val, Sigma0_val,
-                       part = c("all", "offdiag", "block_off"),
-                       p_list = NULL,
-                       weight = NULL,
-                       relative = TRUE,
-                       eps = 1e-12) {
-  part <- match.arg(part)
-
-  p <- nrow(Sigma_val)
-  stopifnot(is.matrix(C_hat), all(dim(C_hat) == c(p, p)))
-
-  Sigma_val <- (Sigma_val + t(Sigma_val)) / 2
-  Sigma0_val <- (Sigma0_val + t(Sigma0_val)) / 2
-  C_hat <- (C_hat + t(C_hat)) / 2
-
-  R <- Sigma0_val %*% C_hat %*% Sigma0_val - Sigma_val
-  R <- (R + t(R)) / 2
-
-  M <- .mask_from_part(p, part = part, p_list = p_list)
-
-  if (!is.null(weight)) {
-    if (length(weight) == 1L) {
-      Rw <- R * as.numeric(weight)
-      Sw <- Sigma_val * as.numeric(weight)
-    } else {
-      stopifnot(is.matrix(weight), all(dim(weight) == c(p, p)))
-      Rw <- R * weight
-      Sw <- Sigma_val * weight
-    }
-  } else {
-    Rw <- R
-    Sw <- Sigma_val
-  }
-
-  num <- sqrt(sum((Rw[M])^2))
-  if (!isTRUE(relative)) return(num)
-
-  den <- sqrt(sum((Sw[M])^2))
-  if (den < eps) return(num)
-  num / den
+.cv_loss <- function(U_hat, Sigma_val, p_list) {
+  Sigma_val0 = .bd_from_S(Sigma_val, p_list)
+  normalization = t(U_hat) %*% Sigma_val0 %*% U_hat
+  return(-sum(diag(solve(normalization) %*% t(U_hat) %*% Sigma_val %*% U_hat)))
 }
 
 # -------------------------------------------------------------------
@@ -546,7 +612,7 @@ sgcar_cv_folds <- function(
           tau_incr = tau_incr,
           tau_decr = tau_decr,
           verbose = FALSE,
-          compute_canon = FALSE
+          compute_canon = TRUE
         )
       }, error = function(e) {
         list(error = conditionMessage(e))
@@ -556,15 +622,15 @@ sgcar_cv_folds <- function(
         losses[li] <- NA_real_
         # do not update state if the fit failed
       } else {
-        losses[li] <- .cv_loss_C(
-          C_hat = fit$C,
+        losses[li] <- .cv_loss(
+          U_hat = fit$U,
           Sigma_val = fs$S_va,
-          Sigma0_val = fs$S0_va,
-          part = part_eff,
-          p_list = p_list,
-          weight = loss_weight,
-          relative = relative_loss
+          p_list = p_list
         )
+        if (losses[li] ==0){
+          #### the C hit 0, so it's not a proper solution
+          losses[li] = 1e8
+        }
         # warm start next lambda
         state <- fit
       }
@@ -622,7 +688,7 @@ sgcar_cv_folds <- function(
       exports <- c(
         "%||%", "matmul", "soft_threshold", "sym_inv_sqrt", "top_eigs_sym",
         ".prox_l21_rows", ".prox_l21_groups",
-        ".make_folds", ".mask_from_part", ".bd_from_S", ".cv_loss_C",
+        ".make_folds", ".mask_from_part", ".bd_from_S", ".cv_loss",
         ".admm_sgca_prepare", ".admm_sgca_run"
       )
       parallel::clusterExport(cl, varlist = exports, envir = environment())

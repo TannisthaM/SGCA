@@ -1,18 +1,18 @@
-library(MASS)
-library(stats)
-library(pracma)
-library(tidyverse)
-library(ggplot2)
-library(Matrix)
-library(tidyr)
-library(geigen)
-library(RGCCA)
-library(dplyr)
-library(expm)
-library(foreach)
-library(doParallel)
-library(future.apply)
+# gao_gca_cv_fixed.R
+# ------------------------------------------------------------
+# Fixes for gao_gca_cv_init_and_final():
+#  - Respects `parallel` argument (TRUE/FALSE)
+#  - Avoids future/multisession "out of sync" errors by using base parallel::parLapply
+#    (PSOCK by default in RStudio/macOS), with automatic fallback to sequential.
+#  - Handles lambda_grid containing 0 safely (no divide-by-zero).
+#  - Uses a consistent rho across folds: rho = rho_scale * sqrt(log(p)/n_train)
+#  - Keeps numerics stable via ridges and B-orthonormal projection.
+#
+# You can source this file AFTER your existing function definitions.
+# If you already defined the same function names, this file will overwrite them.
+# ------------------------------------------------------------
 
+# ---- helpers: symmetric sqrt and inverse sqrt ----
 sqrtm_sym <- function(M, ridge = 0){
   M <- (M + t(M))/2
   ev <- eigen(M, symmetric = TRUE)
@@ -27,9 +27,7 @@ invsqrt_sym <- function(M, ridge = 1e-8){
   ev$vectors %*% diag(1/sqrt(d), length(d)) %*% t(ev$vectors)
 }
 
-
-
-## ---- hard threshold robust to vectors ----
+# ---- hard threshold robust to vectors ----
 hard <- function(U, k){
   if (is.null(dim(U))) U <- matrix(U, ncol = 1)
   p <- nrow(U); r_local <- ncol(U)
@@ -47,192 +45,71 @@ hard <- function(U, k){
   U
 }
 
-
-gca_to_cca <-
-  function(a_estimate, S, pp){
-    p1 = pp[1];
-    p2 = pp[2];
-    p = p1 + p2;
-    sigmaxhat = S[1:p1,1:p1];
-    sigmayhat = S[(p1+1):p,(p1+1):p];
-    u_estimate = a_estimate[1:p1,] %*% pracma::sqrtm(t(a_estimate[1:p1,]) %*% sigmaxhat %*% a_estimate[1:p1,])$Binv;
-    v_estimate = a_estimate[(p1+1):p,] %*% pracma::sqrtm(t(a_estimate[(p1+1):p,]) %*% sigmayhat %*% a_estimate[(p1+1):p,])$Binv;
-    l = list("u" = u_estimate, "v" = v_estimate)
-    return(l)
+# ---- init from Pi without pracma dependency ----
+init_process <- function(Pi, r){
+  s <- svd(Pi)
+  U <- s$u
+  d <- s$d
+  if (r == 1){
+    return(U[, 1, drop = FALSE] * sqrt(d[1]))
+  } else {
+    return(U[, 1:r, drop = FALSE] %*% diag(sqrt(d[1:r]), r, r))
   }
+}
 
-
-Soft <-
-  function(a,b){
-    if(b<0) stop("Can soft-threshold by a nonnegative quantity only.")
-    return(sign(a)*pmax(0,abs(a)-b))
+make_mask_pp <- function(pp){
+  p <- sum(pp)
+  Mask <- matrix(0, p, p)
+  start <- 1
+  for (g in seq_along(pp)){
+    idx <- start:(start + pp[g] - 1)
+    Mask[idx, idx] <- 1
+    start <- start + pp[g]
   }
+  Mask
+}
 
-updatePi <-
-  function(B,sqB,A,H,Gamma,nu,rho,Pi,tau){
-    C <- Pi + 1/tau*A-nu/tau*B%*%Pi%*%B+nu/tau*sqB%*%(H-Gamma)%*%sqB
-    D <- rho/tau
-    return(Soft(C,D))
+trace_obj <- function(S, U){
+  SU <- S %*% U
+  sum(U * SU)
+}
+
+# ---- ADMM init (your "fixed" version, kept here for completeness) ----
+Soft <- function(a,b){
+  if(b<0) stop("Can soft-threshold by a nonnegative quantity only.")
+  sign(a)*pmax(0,abs(a)-b)
+}
+
+updatePi <- function(B,sqB,A,H,Gamma,nu,rho,Pi,tau){
+  C <- Pi + 1/tau*A - nu/tau*B%*%Pi%*%B + nu/tau*sqB%*%(H-Gamma)%*%sqB
+  D <- rho/tau
+  Soft(C,D)
+}
+
+updateH <- function(sqB,Gamma,nu,Pi,K){
+  temp <- 1/nu * Gamma + sqB%*%Pi%*%sqB
+  temp <- (temp+t(temp))/2
+  ev <- eigen(temp, symmetric = TRUE)
+  d <- ev$values
+  
+  if(sum(pmin(1,pmax(d,0)))<=K){
+    dfinal <- pmin(1,pmax(d,0))
+    return(ev$vectors%*%diag(dfinal)%*%t(ev$vectors))
   }
+  fr <- function(x) sum(pmin(1,pmax(d-x,0)))
+  knots <- unique(c((d-1), d))
+  knots <- sort(knots, decreasing=TRUE)
+  temp2 <- which(sapply(knots, fr) <= K)
+  lentemp <- tail(temp2, 1)
+  a <- knots[lentemp]
+  b <- knots[lentemp+1]
+  fa <- sum(pmin(pmax(d-a,0),1))
+  fb <- sum(pmin(pmax(d-b,0),1))
+  theta <- a + (b-a) * (K-fa)/(fb-fa)
+  dfinal <- pmin(1,pmax(d-theta,0))
+  ev$vectors%*%diag(dfinal)%*%t(ev$vectors)
+}
 
-updateH <-
-  function(sqB,Gamma,nu,Pi,K){
-    
-    temp <- 1/nu * Gamma + sqB%*%Pi%*%sqB
-    temp <- (temp+t(temp))/2
-    svdtemp <- eigen(temp)
-    d <- svdtemp$values
-    p <- length(d)
-    if(sum(pmin(1,pmax(d,0)))<=K){
-      dfinal <- pmin(1,pmax(d,0))
-      return(svdtemp$vectors%*%diag(dfinal)%*%t(svdtemp$vectors))
-    }
-    fr <- function(x){
-      sum(pmin(1,pmax(d-x,0)))
-    }
-    # Vincent Vu Fantope Projection
-    knots <- unique(c((d-1),d))
-    knots <- sort(knots,decreasing=TRUE)
-    temp <- which(sapply(knots,fr)<=K)
-    lentemp <- tail(temp,1)
-    a=knots[lentemp]
-    b=knots[lentemp+1]
-    fa <- sum(pmin(pmax(d-a,0),1))
-    fb <- sum(pmin(pmax(d-b,0),1))
-    theta <- a+ (b-a)*(K-fa)/(fb-fa)
-    dfinal <- pmin(1,pmax(d-theta,0))
-    res <- svdtemp$vectors%*%diag(dfinal)%*%t(svdtemp$vectors)
-    return(res)
-  }
-
-
-
-# function to convert Pi from Fantope to input of TGD
-# Inputs:
-# =======
-# Pi:         Output of sgca_init$Pi
-# r:          Latent dimension
-
-# Outputs:
-# ========
-# ainit:   Initialization for the generalized eigenspace
-init_process <-
-  function(Pi, r){
-    ainit = svd(Pi)
-    uest <- ainit$u
-    dest <- diag(ainit$d)
-    if (r == 1){
-      ainit <- uest[,1] * sqrt(dest[1:r,1:r])
-    } else
-      ainit <- uest[,1:r] %*% pracma::sqrtm(dest[1:r,1:r])$B
-    return(ainit)
-  }
-
-
-
-# Function for Intialization via generalized fantope projection
-# Inputs:
-# =======
-# A, B:       Pair of matrix to calculate generalized eigenspace (sigma, sigma0)
-# nu:         Parameter of ADMM, default set to 1
-# K:          nuclear norm constraint, equal to r
-# rho:     penalty parameter on the l_1 norm of the solution, scaled by
-#             sqrt(log(max(p1,p2))/n)
-# epsilon:    tolerance level for convergence in ADMM
-# maxiter:    maximum number of iterations in ADMM
-# trace:      if set to True will print all iterations 
-
-# Outputs:
-# ========
-# $Pi:     optimum of the convex program
-
-sgca_init <-
-  function(A,B,rho,K,nu=1,epsilon=5e-3,maxiter=1000,trace=FALSE){
-    p <- nrow(B)
-    eigenB <- eigen(B)
-    sqB <- eigenB$vectors%*%sqrt(diag(pmax(eigenB$values,0)))%*%t(eigenB$vectors)	
-    tau <- 4*nu*eigenB$values[1]^2	
-    criteria <- 1e10
-    i <- 1
-    # Initialize parameters
-    H <- Pi <- oldPi <-  diag(1,p,p)
-    Gamma <- matrix(0,p,p)
-    # While loop for the iterations
-    while(criteria > epsilon && i <= maxiter){
-      for (i in 1:20){
-        Pi <- updatePi(B,sqB,A,H,Gamma,nu,rho,Pi,tau)
-      }
-      #Pi <- updatePi(B,sqB,A,H,Gamma,nu,lambda,Pi,tau)
-      
-      H <- updateH(sqB,Gamma,nu,Pi,K)
-      Gamma <- Gamma + (sqB%*%Pi%*%sqB-H) * nu	
-      criteria <- sqrt(sum((Pi-oldPi)^2))
-      oldPi <- Pi
-      i <- i+1
-      if(trace==TRUE)
-      {
-        print(i)
-        print(criteria)
-      }
-    }
-    return(list(Pi=Pi,H=H,Gamma=Gamma,iteration=i,convergence=criteria))
-    
-  }
-
-# Function for Thredholded Gradient Descent
-# Inputs:
-# =======
-# A, B:         Pair of matrix to calculate generalized eigenspace (sigma, sigma0)
-# r:            Latent dimension
-# init:         Initialize estimator of generlized eigenspace, obtained from sgca_int. Need to be k-sparse
-# lambda:       penalty parameter of Lagrangian function f(L), default to be 0.01
-# convergence:  tolerance level for convergence in TGD
-# maxiter:      maximum number of iterations in TGD
-# plot:         if set to True will plot intermediate iterations, need to specify scale variable V (as shown in paper)
-#               default set to False
-
-# Outputs:
-# ========
-# final_estimate:   final estimation of leading r sparse generalized eigenspace
-
-sgca_tgd <-
-  function(A, B, r, init, k, lambda = 0.01, eta=0.01, convergence=1e-3, maxiter=10000, plot = FALSE){
-    #perform hard thresholding
-    init <- hard(init, k)
-    u <- init
-    criteria <- 1e10
-    iter <- 0
-    error <- rep(0, maxiter)
-    # renormalization 
-    ut <- init %*% pracma::sqrtm(diag(r)+t(u) %*% A %*% u/lambda)$B;
-    
-    while(criteria > convergence && iter <= maxiter){
-      #perform gradient descent
-      grad <- -A %*% ut + lambda * B %*% ut %*% (t(ut) %*% B %*% ut- diag(r));
-      vt <- ut - eta * grad
-      
-      
-      # Perform truncation
-      vt <- hard(vt, k)
-      
-      criteria <- sqrt(sum((ut-vt)^2))
-      
-      ut <- vt
-      iter <- iter+1
-      if (plot){
-        error[iter] <- subdistance(vt, scale)
-      }
-    }
-    if (plot){
-      plot(error[1:iter], type='l',  main="Matrix distance and iterations", 
-           xlab="Number of iterations", ylab="Matrix distance",)
-    }
-    final_estimate <- ut %*% pracma::sqrtm(t(ut) %*% B %*% ut)$Binv
-    return(final_estimate)
-  }
-
-
-## ---- safer sgca_init (symmetrize + tau guard) ----
 sgca_init_fixed <- function(A,B,rho,K,nu=1,epsilon=5e-3,maxiter=1000,trace=FALSE){
   A <- (A + t(A))/2
   B <- (B + t(B))/2
@@ -264,28 +141,46 @@ sgca_init_fixed <- function(A,B,rho,K,nu=1,epsilon=5e-3,maxiter=1000,trace=FALSE
   list(Pi=Pi,H=H,Gamma=Gamma,iteration=iter,convergence=criteria)
 }
 
-## ---- sgca_tgd that NEVER calls pracma::sqrtm (uses eigen + ridge) ----
-sgca_tgd_safe <- function(A, B, r, init, k, lambda = 0.01, eta = 0.01,
-                          convergence = 1e-3, maxiter = 10000,
+# ------------------------------------------------------------
+# Safer TGD that supports lambda=0 and projects to U^T B U = I
+# ------------------------------------------------------------
+sgca_tgd_safe <- function(A, B, r, init, k,
+                          lambda = 0.01,
+                          eta = 0.01,
+                          convergence = 1e-3,
+                          maxiter = 10000,
                           ridge_norm = 1e-8){
   
   A <- (A + t(A))/2
   B <- (B + t(B))/2
   
+  # start with hard threshold
   ut <- hard(init, k)
-  ut <- ut %*% sqrtm_sym(diag(r) + (t(ut) %*% A %*% ut) / lambda, ridge = 0)
+  
+  # initial B-orthonormalization (works for any lambda, including 0)
+  ut <- ut %*% invsqrt_sym(t(ut) %*% B %*% ut, ridge = ridge_norm)
   
   criteria <- Inf
   iter <- 0
   
   while(criteria > convergence && iter < maxiter){
-    G <- t(ut) %*% B %*% ut - diag(r)
-    grad <- -A %*% ut + lambda * B %*% ut %*% G
-    vt <- ut - eta * grad
-    vt <- hard(vt, k)
     
-    if (!all(is.finite(vt))) {
+    if (!all(is.finite(ut))) {
       return(matrix(NA_real_, nrow = nrow(A), ncol = r))
+    }
+    
+    if (lambda <= 0) {
+      # lambda=0 mode: projected gradient on -tr(U^T A U)
+      grad <- -A %*% ut
+      vt <- ut - eta * grad
+      vt <- hard(vt, k)
+      vt <- vt %*% invsqrt_sym(t(vt) %*% B %*% vt, ridge = ridge_norm)
+    } else {
+      G <- t(ut) %*% B %*% ut - diag(r)
+      grad <- -A %*% ut + lambda * B %*% ut %*% G
+      vt <- ut - eta * grad
+      vt <- hard(vt, k)
+      vt <- vt %*% invsqrt_sym(t(vt) %*% B %*% vt, ridge = ridge_norm)
     }
     
     criteria <- sqrt(sum((ut - vt)^2))
@@ -293,159 +188,16 @@ sgca_tgd_safe <- function(A, B, r, init, k, lambda = 0.01, eta = 0.01,
     iter <- iter + 1
   }
   
-  ut %*% invsqrt_sym(t(ut) %*% B %*% ut, ridge = ridge_norm)
+  ut
 }
 
-
-make_mask_pp <- function(pp){
-  p <- sum(pp)
-  Mask <- matrix(0, p, p)
-  start <- 1
-  for (g in seq_along(pp)){
-    idx <- start:(start + pp[g] - 1)
-    Mask[idx, idx] <- 1
-    start <- start + pp[g]
-  }
-  Mask
-}
-
-trace_obj <- function(S, U){
-  SU <- S %*% U
-  sum(U * SU)
-}
-
-## ---- 5-fold CV for lambda (parallel across folds) ----
-sgca_cv_lambda <- function(X, pp, r, k, lambda_grid,
-                           nfold = 5,
-                           eta = 1e-3,
-                           rho_scale = 0.5,
-                           ridge_B = 1e-6,
-                           ridge_norm = 1e-8,
-                           nu = 1,
-                           epsilon = 5e-3,
-                           maxiter_admm = 1000,
-                           convergence = 1e-6,
-                           maxiter_tgd = 15000,
-                           renorm_by_sigma0 = TRUE,
-                           center = TRUE,
-                           ncores = max(1, parallel::detectCores() - 1),
-                           seed = 2023){
-  
-  X <- as.matrix(X)
-  n <- nrow(X); p <- ncol(X)
-  stopifnot(sum(pp) == p)
-  
-  Mask <- make_mask_pp(pp)
-  set.seed(seed)
-  fold_id <- sample(rep(1:nfold, length.out = n))
-  
-  old_plan <- future::plan()
-  on.exit(future::plan(old_plan), add = TRUE)
-  future::plan(future::multisession, workers = ncores)
-  
-  fold_scores <- future_lapply(1:nfold, function(f){
-    
-    tr <- which(fold_id != f)
-    va <- which(fold_id == f)
-    
-    Xtr <- X[tr, , drop = FALSE]
-    Xva <- X[va, , drop = FALSE]
-    
-    if (center){
-      mu <- colMeans(Xtr)
-      Xtr <- sweep(Xtr, 2, mu, "-")
-      Xva <- sweep(Xva, 2, mu, "-")
-    }
-    
-    ntr <- nrow(Xtr); nva <- nrow(Xva)
-    
-    S_tr <- crossprod(Xtr) / ntr; S_tr <- (S_tr + t(S_tr))/2
-    S_va <- crossprod(Xva) / nva; S_va <- (S_va + t(S_va))/2
-    
-    B_tr <- S_tr * Mask
-    B_va <- S_va * Mask
-    
-    # tiny ridge to avoid fold singularities
-    if (ridge_B > 0){
-      B_tr <- B_tr + ridge_B * diag(p)
-      B_va <- B_va + ridge_B * diag(p)
-    }
-    B_tr <- (B_tr + t(B_tr))/2
-    B_va <- (B_va + t(B_va))/2
-    
-    rho <- rho_scale * sqrt(log(p) / ntr)
-    
-    ag <- tryCatch(
-      sgca_init_fixed(A = S_tr, B = B_tr, rho = rho, K = r,
-                      nu = nu, epsilon = epsilon, maxiter = maxiter_admm),
-      error = function(e) NULL
-    )
-    if (is.null(ag)) return(rep(NA_real_, length(lambda_grid)))
-    
-    ainit <- init_process(ag$Pi, r)
-    
-    vapply(lambda_grid, function(lam){
-      tryCatch({
-        U_tr <- sgca_tgd_safe(A = S_tr, B = B_tr, r = r, init = ainit, k = k,
-                              lambda = lam, eta = eta,
-                              convergence = convergence, maxiter = maxiter_tgd,
-                              ridge_norm = ridge_norm)
-        if (anyNA(U_tr)) return(NA_real_)
-        
-        U_use <- if (renorm_by_sigma0){
-          U_tr %*% invsqrt_sym(t(U_tr) %*% B_va %*% U_tr, ridge = ridge_norm)
-        } else U_tr
-        
-        trace_obj(S_va, U_use)
-      }, error = function(e) NA_real_)
-    }, numeric(1))
-    
-  }, future.seed = TRUE)
-  
-  score_mat <- do.call(rbind, fold_scores)
-  cv_mean <- colMeans(score_mat, na.rm = TRUE)
-  cv_sd   <- apply(score_mat, 2, sd, na.rm = TRUE)
-  
-  best_idx <- which.max(replace(cv_mean, is.na(cv_mean), -Inf))
-  best_lambda <- lambda_grid[best_idx]
-  
-  # Refit full
-  Xfull <- if (center) scale(X, center = TRUE, scale = FALSE) else X
-  nfull <- nrow(Xfull)
-  
-  S_full <- crossprod(Xfull) / nfull; S_full <- (S_full + t(S_full))/2
-  B_full <- S_full * Mask
-  if (ridge_B > 0) B_full <- B_full + ridge_B * diag(p)
-  B_full <- (B_full + t(B_full))/2
-  
-  rho_full <- rho_scale * sqrt(log(p) / nfull)
-  
-  ag_full <- sgca_init_fixed(A = S_full, B = B_full, rho = rho_full, K = r,
-                             nu = nu, epsilon = epsilon, maxiter = maxiter_admm)
-  
-  ainit_full <- init_process(ag_full$Pi, r)
-  
-  U_full <- sgca_tgd_safe(A = S_full, B = B_full, r = r, init = ainit_full, k = k,
-                          lambda = best_lambda, eta = eta,
-                          convergence = convergence, maxiter = maxiter_tgd,
-                          ridge_norm = ridge_norm)
-  
-  list(best_lambda = best_lambda,
-       lambda_grid = lambda_grid,
-       cv_mean = cv_mean,
-       cv_sd = cv_sd,
-       fold_scores = score_mat,
-       U_full = U_full)
-}
-
-## 5-fold CV:
-## - init-only score (single number per fold; rho fixed by rho_scale)
-## - init+TGD score (vector over lambda_grid per fold)
-## Returns BOTH full-data canonical vectors: init-only and init+TGD.
-sgca_cv_init_and_final <- function(
+# ------------------------------------------------------------
+# Fixed CV function (no future; stable parallel + fallback)
+# ------------------------------------------------------------
+gao_gca_cv_init_and_final <- function(
     X, pp, r, k,
     lambda_grid,
-    rho_scale = 1,          # <-- FIXED (no CV over rho)
+    rho_scale = 1,
     nfold = 5,
     eta = 1e-3,
     ridge_B = 1e-6,
@@ -455,36 +207,34 @@ sgca_cv_init_and_final <- function(
     maxiter_admm = 1000,
     convergence = 1e-6,
     maxiter_tgd = 15000,
-    renorm_by_sigma0 = TRUE,  # TRUE: normalize on B_val; FALSE: normalize on B_train
+    parallel = TRUE,
+    renorm_by_sigma0 = TRUE,
     center = TRUE,
     ncores = max(1, parallel::detectCores() - 1),
-    seed = 2023
+    seed = 2023,
+    cluster_type = c("auto", "PSOCK", "FORK"),
+    verbose = TRUE
 ){
   
+  cluster_type <- match.arg(cluster_type)
   X <- as.matrix(X)
   n <- nrow(X); p <- ncol(X)
-  stopifnot(sum(pp) == p)
+  if (sum(pp) != p) stop("sum(pp) must equal ncol(X).")
   
+  lambda_grid <- as.numeric(lambda_grid)
   Mask <- make_mask_pp(pp)
   
   set.seed(seed)
-  fold_id <- sample(rep(1:nfold, length.out = n))
+  fold_id <- sample(rep(seq_len(nfold), length.out = n))
   
-  old_plan <- future::plan()
-  on.exit(future::plan(old_plan), add = TRUE)
-  future::plan(future::multisession, workers = ncores)
-  
-  lambda_grid <- as.numeric(lambda_grid)
-  
-  fold_res <- future_lapply(1:nfold, function(f){
-    
+  fold_fun <- function(f){
     tr <- which(fold_id != f)
     va <- which(fold_id == f)
     
     Xtr <- X[tr, , drop = FALSE]
     Xva <- X[va, , drop = FALSE]
     
-    if (center){
+    if (isTRUE(center)){
       mu <- colMeans(Xtr)
       Xtr <- sweep(Xtr, 2, mu, "-")
       Xva <- sweep(Xva, 2, mu, "-")
@@ -505,8 +255,8 @@ sgca_cv_init_and_final <- function(
     B_tr <- (B_tr + t(B_tr))/2
     B_va <- (B_va + t(B_va))/2
     
-    # ---- FIXED rho (no tuning) ----
-    rho <- rho_scale * 1
+    # consistent rho across folds
+    rho <- rho_scale * sqrt(log(p) / ntr)
     
     ag <- tryCatch(
       sgca_init_fixed(A = S_tr, B = B_tr, rho = rho, K = r,
@@ -520,16 +270,16 @@ sgca_cv_init_and_final <- function(
     
     ainit <- init_process(ag$Pi, r)
     
-    # ---- init-only canonical vectors + held-out scoring ----
+    # init-only score
     U0 <- hard(ainit, k)
-    U0_use <- if (renorm_by_sigma0){
+    U0_use <- if (isTRUE(renorm_by_sigma0)){
       U0 %*% invsqrt_sym(t(U0) %*% B_va %*% U0, ridge = ridge_norm)
     } else {
       U0 %*% invsqrt_sym(t(U0) %*% B_tr %*% U0, ridge = ridge_norm)
     }
     init_score <- trace_obj(S_va, U0_use)
     
-    # ---- init+TGD scores over lambda ----
+    # final scores across lambdas
     final_scores <- vapply(lambda_grid, function(lam){
       tryCatch({
         U_tr <- sgca_tgd_safe(A = S_tr, B = B_tr, r = r, init = ainit, k = k,
@@ -538,7 +288,7 @@ sgca_cv_init_and_final <- function(
                               ridge_norm = ridge_norm)
         if (anyNA(U_tr)) return(NA_real_)
         
-        U_use <- if (renorm_by_sigma0){
+        U_use <- if (isTRUE(renorm_by_sigma0)){
           U_tr %*% invsqrt_sym(t(U_tr) %*% B_va %*% U_tr, ridge = ridge_norm)
         } else U_tr
         
@@ -547,12 +297,74 @@ sgca_cv_init_and_final <- function(
     }, numeric(1))
     
     list(init_score = init_score, final_scores = final_scores)
-    
-  }, future.seed = TRUE)
+  }
   
-  ## ---- aggregate CV results ----
+  # ---- run folds (parallel or sequential) ----
+  did_parallel <- FALSE
+  fold_res <- NULL
+  
+  if (isTRUE(parallel) && nfold > 1 && ncores > 1) {
+    nworkers <- min(as.integer(ncores), as.integer(nfold))
+    
+    # choose cluster type safely
+    type_eff <- cluster_type
+    if (type_eff == "auto") {
+      if (.Platform$OS.type == "windows" || Sys.getenv("RSTUDIO") == "1") {
+        type_eff <- "PSOCK"
+      } else {
+        type_eff <- "FORK"
+      }
+    }
+    
+    if (type_eff == "FORK" && .Platform$OS.type == "unix" && Sys.getenv("RSTUDIO") != "1") {
+      # forked apply
+      fold_res <- tryCatch(
+        parallel::mclapply(seq_len(nfold), fold_fun, mc.cores = nworkers),
+        error = function(e) NULL
+      )
+      did_parallel <- !is.null(fold_res)
+    } else {
+      # PSOCK
+      cl <- tryCatch(parallel::makeCluster(nworkers, type = "PSOCK"),
+                     error = function(e) NULL)
+      if (!is.null(cl)) {
+        on.exit(try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
+        try(parallel::clusterSetRNGStream(cl, iseed = as.integer(seed)), silent = TRUE)
+        
+        # Export everything needed by fold_fun
+        parallel::clusterExport(
+          cl,
+          varlist = c("X","pp","r","k","lambda_grid","rho_scale","nfold","eta",
+                      "ridge_B","ridge_norm","nu","epsilon","maxiter_admm",
+                      "convergence","maxiter_tgd","renorm_by_sigma0","center",
+                      "Mask","fold_id",
+                      # functions
+                      "sqrtm_sym","invsqrt_sym","hard","init_process",
+                      "Soft","updatePi","updateH","sgca_init_fixed","sgca_tgd_safe",
+                      "make_mask_pp","trace_obj","fold_fun"),
+          envir = environment()
+        )
+        
+        fold_res <- tryCatch(
+          parallel::parLapply(cl, seq_len(nfold), fold_fun),
+          error = function(e) NULL
+        )
+        did_parallel <- !is.null(fold_res)
+      }
+    }
+    
+    if (!did_parallel) {
+      if (isTRUE(verbose)) message("[gao_gca_cv] parallel failed -> running sequentially")
+    }
+  }
+  
+  if (is.null(fold_res)) {
+    fold_res <- lapply(seq_len(nfold), fold_fun)
+  }
+  
+  # ---- aggregate ----
   init_vec  <- vapply(fold_res, `[[`, numeric(1), "init_score")
-  final_mat <- do.call(rbind, lapply(fold_res, `[[`, "final_scores"))  # nfold x nlambda
+  final_mat <- do.call(rbind, lapply(fold_res, `[[`, "final_scores"))
   
   init_mean <- mean(init_vec, na.rm = TRUE)
   init_sd   <- sd(init_vec, na.rm = TRUE)
@@ -563,8 +375,8 @@ sgca_cv_init_and_final <- function(
   best_lambda_idx <- which.max(replace(final_mean, is.na(final_mean), -Inf))
   best_lambda <- lambda_grid[best_lambda_idx]
   
-  ## ---- refit on FULL data (both init-only and init+TGD) ----
-  Xfull <- if (center) scale(X, center = TRUE, scale = FALSE) else X
+  # ---- refit on full data ----
+  Xfull <- if (isTRUE(center)) scale(X, center = TRUE, scale = FALSE) else X
   nfull <- nrow(Xfull)
   
   S_full <- crossprod(Xfull) / nfull; S_full <- (S_full + t(S_full))/2
@@ -578,12 +390,10 @@ sgca_cv_init_and_final <- function(
                              nu = nu, epsilon = epsilon, maxiter = maxiter_admm)
   ainit_full <- init_process(ag_full$Pi, r)
   
-  # init-only on full
   U_full_init <- hard(ainit_full, k)
   U_full_init <- U_full_init %*% invsqrt_sym(t(U_full_init) %*% B_full %*% U_full_init,
                                              ridge = ridge_norm)
   
-  # init + TGD on full with best lambda
   U_full_final <- sgca_tgd_safe(A = S_full, B = B_full, r = r, init = ainit_full, k = k,
                                 lambda = best_lambda, eta = eta,
                                 convergence = convergence, maxiter = maxiter_tgd,
@@ -606,9 +416,9 @@ sgca_cv_init_and_final <- function(
     
     # full-data canonical vectors
     U_full_init = U_full_init,
-    U_full_final = U_full_final
+    U_full_final = U_full_final,
+    
+    # bookkeeping
+    did_parallel = did_parallel
   )
 }
-
-
-
