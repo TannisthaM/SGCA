@@ -41,6 +41,7 @@ rgcca_holdout_score <- function(Y_test, connection = NULL, scheme = "factorial",
   score
 }
 
+
 rgcca_unsupervised_cv_tau <- function(
     blocks, lambda_values,
     connection = NULL,
@@ -51,8 +52,11 @@ rgcca_unsupervised_cv_tau <- function(
     seed = 1,
     scale = TRUE,
     scale_block = TRUE,
-    bias = TRUE
+    bias = TRUE,
+    method = c("rgcca", "sgcca")   # NEW
 ) {
+  method <- match.arg(method)      # NEW
+  
   # ---- ENSURE BLOCK NAMES ----
   if (is.null(names(blocks)) || any(names(blocks) == "")) {
     names(blocks) <- paste0("block", seq_along(blocks))
@@ -63,17 +67,17 @@ rgcca_unsupervised_cv_tau <- function(
   blocks <- lapply(seq_along(blocks), function(j) {
     nm <- names(blocks)[j]
     B  <- as.matrix(blocks[[j]])
-  
+    
     if (is.null(colnames(B))) {
       colnames(B) <- paste0(nm, "_V", seq_len(ncol(B)))
     } else {
       # still make them unique + prefixed to avoid cross-block duplicates
       colnames(B) <- paste0(nm, "_", make.unique(colnames(B)))
     }
-  
+    
     B
   })
-
+  
   J <- length(blocks)
   n <- nrow(blocks[[1]])
   if (is.null(connection)) connection <- 1 - diag(J)
@@ -104,7 +108,7 @@ rgcca_unsupervised_cv_tau <- function(
           RGCCA::rgcca(
             blocks = train_blocks,
             connection = connection,
-            method = "rgcca",
+            method = method,              # CHANGED (was "rgcca")
             tau = tau_vec,
             ncomp = ncomp,
             scheme = scheme,
@@ -114,7 +118,8 @@ rgcca_unsupervised_cv_tau <- function(
             verbose = FALSE
           ),
           error = function(e) {
-            message("rgcca() failed: fold=", f, " tau=", tau_scalar, " :: ", conditionMessage(e))
+            message("rgcca() failed: fold=", f, " tau=", tau_scalar,
+                    " method=", method, " :: ", conditionMessage(e))
             NULL
           }
         )
@@ -123,13 +128,13 @@ rgcca_unsupervised_cv_tau <- function(
         trans <- tryCatch(
           RGCCA::rgcca_transform(fit, blocks_test = test_blocks),
           error = function(e) {
-            message("rgcca_transform() failed: fold=", f, " tau=", tau_scalar, " :: ", conditionMessage(e))
+            message("rgcca_transform() failed: fold=", f, " tau=", tau_scalar,
+                    " method=", method, " :: ", conditionMessage(e))
             NULL
           }
         )
         if (is.null(trans)) return(NA_real_)
         
-        # rgcca_transform() returns a list of projected blocks (no $Y needed)
         rgcca_holdout_score(trans, connection = connection, scheme = scheme, bias = bias, comp = 1)
       })
     },
@@ -144,10 +149,10 @@ rgcca_unsupervised_cv_tau <- function(
   best_idx <- which.max(replace(cv_mean, is.na(cv_mean), -Inf))
   best_tau <- lambda_values[best_idx]
   
-  fit_full <- rgcca(
+  fit_full <- RGCCA::rgcca(
     blocks = blocks,
     connection = connection,
-    method = "rgcca",
+    method = method,               # CHANGED (was "rgcca")
     tau = rep(best_tau, J),
     ncomp = ncomp,
     scheme = scheme,
@@ -163,6 +168,9 @@ rgcca_unsupervised_cv_tau <- function(
     cv_mean = cv_mean,
     cv_sd = cv_sd,
     best_tau = best_tau,
-    fit_full = fit_full
+    fit_full = fit_full,
+    method = method               # NEW (handy for debugging)
   )
 }
+
+
