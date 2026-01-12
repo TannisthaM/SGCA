@@ -242,8 +242,8 @@ gao_gca_cv_init_and_final <- function(
     
     ntr <- nrow(Xtr); nva <- nrow(Xva)
     
-    S_tr <- crossprod(Xtr) / ntr; S_tr <- (S_tr + t(S_tr))/2
-    S_va <- crossprod(Xva) / nva; S_va <- (S_va + t(S_va))/2
+    S_tr <- base::crossprod(Xtr) / ntr; S_tr <- (S_tr + t(S_tr))/2
+    S_va <- base::crossprod(Xva) / nva; S_va <- (S_va + t(S_va))/2
     
     B_tr <- S_tr * Mask
     B_va <- S_va * Mask
@@ -379,7 +379,7 @@ gao_gca_cv_init_and_final <- function(
   Xfull <- if (isTRUE(center)) scale(X, center = TRUE, scale = FALSE) else X
   nfull <- nrow(Xfull)
   
-  S_full <- crossprod(Xfull) / nfull; S_full <- (S_full + t(S_full))/2
+  S_full <- base::crossprod(Xfull) / nfull; S_full <- (S_full + t(S_full))/2
   B_full <- S_full * Mask
   if (ridge_B > 0) B_full <- B_full + ridge_B * diag(p)
   B_full <- (B_full + t(B_full))/2

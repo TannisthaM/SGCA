@@ -520,7 +520,7 @@ sgcar_cv_folds <- function(
        penalty, penalize, part_eff, warm_start, lambda_order)
 
   # Full-data second moment
-  M_full <- crossprod(X)
+  M_full <- base::crossprod(X)
   S_full <- (M_full / n)
   S_full <- (S_full + t(S_full)) / 2
   S0_full <- .bd_from_S(S_full, p_list)
@@ -535,7 +535,7 @@ sgcar_cv_folds <- function(
     if (n_tr <= 1) stop("A training fold has <= 1 sample. Reduce K.")
 
     Xval <- X[idx_val, , drop = FALSE]
-    M_val <- crossprod(Xval)
+    M_val <- base::crossprod(Xval)
 
     S_va <- (M_val / n_val)
     S_va <- (S_va + t(S_va)) / 2
