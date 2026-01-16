@@ -1,9 +1,6 @@
-library(tidyverse)
-# IMPORTANT: blocks MUST be a named list
-source("R/tenenhaus_cv.R")
-source("R/multicca_cv.R")
-source("R/gao_cv_functions.R")
-source("R/sgcar.R")
+library(SGCAR)
+library(Matrix)
+library(MASS)
 pp <- c(10,10,10);
 p <- sum(pp)
 s  <- c(1:5);
@@ -74,7 +71,7 @@ blocks[[3]]=X[,idx3]
 names(blocks) <- paste0("block", seq_along(blocks))
 
 block_names <- names(blocks)
-lambda_values <- c(0.000001, 0.001, 0.1, 0.25, 0.5, 0.75, 1, 10, 100)
+lambda_values <- c(0.000001, 0.001, 0.1, 0.25, 0.5, 0.75, 1)
 
 cv_unsup <- rgcca_unsupervised_cv_tau(
   blocks = blocks,
@@ -90,7 +87,6 @@ colnames(blocks[[2]]) <- sapply(1:ncol(blocks[[2]]), function(x){paste0("block2_
 colnames(blocks[[3]]) <- sapply(1:ncol(blocks[[3]]), function(x){paste0("block3_V", x)})
 
 fit_best <- cv_unsup$fit_full
-a_tenehaus = rgcca_transform(fit_best, blocks_test = blocks)
 print(paste0("Error for Tenehaus is: ", sqrt(mean((c(fit_best$a[[1]], fit_best$a[[2]],
                                                     fit_best$a[[3]])- a_star)^2) )))
 
@@ -116,17 +112,15 @@ print(paste0("Error for MultiCCA is: ", sqrt(mean((c(fit_best$ws[[1]], fit_best$
 #########################SGCA WITHOUT CV##################################
 k=10
 
-ag <- sgca_init(A=S, B=sigma0hat, rho=0.5*sqrt(log(p)/n),K=r ,nu=1,trace=FALSE)
+ag <- sgca_init_fixed(A=S, B=sigma0hat, rho=0.5*sqrt(log(p)/n),K=r ,nu=1,trace=FALSE)
 ainit <- init_process(ag$Pi, r)
-final <- sgca_tgd(A=S, B=sigma0hat, r,ainit,k,lambda = 0.001, real_astar = a_star,
-                  eta=0.001,convergence=1e-6,maxiter=15000, plot = TRUE)
+final <- sgca_tgd_safe(A=S, B=sigma0hat, r,ainit,k,lambda = 0.001,
+                  eta=0.001,convergence=1e-6,maxiter=15000)
 print(paste0("Error for Gao SGCA is: ", sqrt(mean((final- a_star)^2) )))
 ####################SGCA WITH CV OVER LAMBDA###############################
 
 lambda_values <- c(1e-5,1e-4,1e-3,1e-2, 0.1, 1,10,100,1000,1e+4,1e+5)
 
-X, pp, r, k,
-lambda_grid,
 rho_scale = 1,
 nfold = 5,
 eta = 1e-3,
@@ -165,34 +159,9 @@ fit_admm <- admm_sgca(S, sigma0hat, 0.0001, r,
                       penalize = "all",
                       penalty = "l1")
 
-prep <- .admm_sgca_prepare(
-  Sigma = S,
-  Sigma0 = sigma0hat,
-  rho = 1,
-  p_list = pp,
-  penalty = "l1",
-  penalize = "all"
-)
-
-
-fit_admm2 <- .admm_sgca_run(prep,
-                            0.0001,
-                           r,
-                           init = NULL,
-                           warm_start = "none",
-                           max_iter = 4000,
-                           abs_tol = 1e-4,
-                           rel_tol = 1e-3,
-                           adapt_rho = FALSE,
-                           mu = 10,
-                           tau_incr = 2,
-                           tau_decr = 2,
-                           verbose = FALSE,
-                           compute_canon = TRUE)
 
 
 print(paste0("Error for ADMM is: ", sqrt(mean((fit_admm$U- a_star)^2) )))
-print(paste0("Error for ADMM is: ", sqrt(mean((fit_admm2$U- a_star)^2) )))
 
 fit_admm_cv <- sgcar_cv_folds(
     X,

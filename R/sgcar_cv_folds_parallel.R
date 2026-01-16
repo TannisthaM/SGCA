@@ -215,7 +215,7 @@ setup_parallel_backend <- function(num_cores = NULL, verbose = FALSE) {
 # Prepare constants for repeated lambda fits on the *same* (Sigma, Sigma0).
 # This is what makes the warm-start path efficient.
 .admm_sgca_prepare <- function(Sigma, Sigma0,
-                              rho = 1,
+                              rho = NA,
                               p_list = NULL,
                               penalty = c("l1", "l21_rows", "l21_groups"),
                               penalize = c("offdiag", "all", "block"),
@@ -228,6 +228,8 @@ setup_parallel_backend <- function(num_cores = NULL, verbose = FALSE) {
 
   penalty <- match.arg(penalty)
   penalize <- match.arg(penalize)
+  
+
 
   Sigma <- (Sigma + t(Sigma)) / 2
   Sigma0 <- (Sigma0 + t(Sigma0)) / 2
@@ -239,6 +241,11 @@ setup_parallel_backend <- function(num_cores = NULL, verbose = FALSE) {
   U0 <- ev0$vectors
   lam2 <- pmax(ev0$values, 0)
   Lam2 <- diag(lam2, nrow = length(lam2))
+  
+  if (is.na(rho)){
+    d <- lam2
+    rho  = stats::median(outer(d^2, d^2))
+  }
 
   # constants for the C update in Sigma0-basis
   Sigma_tilde <- matmul(t(U0), matmul(Sigma, U0))
@@ -425,10 +432,17 @@ setup_parallel_backend <- function(num_cores = NULL, verbose = FALSE) {
     target <- matmul(Sigma0_sqrt, matmul(C, Sigma0_sqrt))
     eU <- top_eigs_sym(target, r)
     U_svd <- eU$vectors
+    # Not over ---- need to compute the correct normalization
+    if (r == 1){
+      U_canon <- matmul(C, Sigma0_sqrt) %*% U_svd  * 1/eU$values
+    }else{
+      U_canon <- matmul(C, Sigma0_sqrt) %*% U_svd %*% diag(1/eU$values)
+    }
+    
 
     # normalize to enforce U^T Sigma0 U = I
-    B <- matmul(t(U_svd), matmul(prep$Sigma0, U_svd))
-    U_canon <- matmul(U_svd, sym_inv_sqrt(B))
+    #B <- matmul(t(U_svd), matmul(prep$Sigma0, U_svd))
+    #U_canon <- matmul(U_svd, sym_inv_sqrt(B))
 
     out$U <- U_canon
     out$cor <- sqrt(pmax(eU$values, 0))
