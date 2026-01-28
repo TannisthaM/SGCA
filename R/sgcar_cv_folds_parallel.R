@@ -205,7 +205,8 @@ setup_parallel_backend <- function(num_cores = NULL, verbose = FALSE) {
 .cv_loss <- function(U_hat, Sigma_val, p_list) {
   Sigma_val0 = .bd_from_S(Sigma_val, p_list)
   normalization = t(U_hat) %*% Sigma_val0 %*% U_hat
-  return(-sum(diag(solve(normalization) %*% t(U_hat) %*% Sigma_val %*% U_hat)))
+  return(-sum(diag( t(U_hat) %*% Sigma_val %*% U_hat)))
+  #return(-sum(diag(solve(normalization) %*% t(U_hat) %*% Sigma_val %*% U_hat)))
 }
 
 # -------------------------------------------------------------------
@@ -826,7 +827,8 @@ sgcar_cv_folds <- function(
     did_parallel = did_parallel,
     parallel_failed_reason = parallel_failed_reason,
     lambda_order = lambda_order,
-    warm_start = warm_start
+    warm_start = warm_start,
+    out= fit_min$iter
   )
   class(out) <- "cv_sgcar"
   out
