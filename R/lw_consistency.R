@@ -73,6 +73,7 @@ solve_C_supported_idx123 <- function(S, sigma0hat, pp1, pp2, pp3,
 }
 
 
+
 pp=c(10,10,10);   N=c(30, 1000, 10000, 50000, 100000)
 
 s  <- 1:5
@@ -405,7 +406,8 @@ for (j in 1:5) {
     
     ###########loss for r=1 ######################################
     ###########loss for r=1 ######################################
-    fit_admm_GT <- SGCAR:::.admm_sgca_run(
+    
+    fit_admm_GT <- .admm_sgca_run(
       prep = SGCAR:::.admm_sgca_prepare(
         Sigma  = Sigma,
         Sigma0 = Sigma0,
@@ -415,10 +417,15 @@ for (j in 1:5) {
         penalize = "all",
         symmetrize_z = TRUE
       ),
-      lambda = 0,adapt_rho=TRUE,
-      r = r,
+      lambda = 0,
+      warm_start =  "none",
+      r = 1,
+      verbose=TRUE,
+      adapt_rho = TRUE,
       compute_canon = TRUE,
-      max_iter = 10000
+      abs_tol = 1e-10,
+      rel_tol = 1e-10,
+      max_iter = 100000
     )
     oracle$loss[j] <- min(sqrt(mean((fit_admm_GT$U[,1] - a)^2)),
                           sqrt(mean((fit_admm_GT$U[,1] + a)^2)))
