@@ -208,12 +208,13 @@ gao_gca_cv_init_and_final <- function(
     convergence = 1e-6,
     maxiter_tgd = 15000,
     parallel = TRUE,
-    renorm_by_sigma0 = TRUE,
+    renorm_by_sigma0 = FALSE,   # <- match sgcar active loss by default
     center = TRUE,
     ncores = max(1, parallel::detectCores() - 1),
     seed = 2023,
     cluster_type = c("auto", "PSOCK", "FORK"),
-    verbose = TRUE
+    verbose = TRUE,
+    zero_loss_penalty = 1e8
 ){
   
   cluster_type <- match.arg(cluster_type)
@@ -221,8 +222,55 @@ gao_gca_cv_init_and_final <- function(
   n <- nrow(X); p <- ncol(X)
   if (sum(pp) != p) stop("sum(pp) must equal ncol(X).")
   
+  # ---- grids ----
   lambda_grid <- as.numeric(lambda_grid)
+  if (length(lambda_grid) < 1) stop("lambda_grid must have length >= 1.")
+  
+  k_grid <- as.integer(k)
+  k_grid <- k_grid[is.finite(k_grid)]
+  k_grid <- sort(unique(k_grid))
+  k_grid <- k_grid[k_grid >= 1 & k_grid <= p]
+  if (any(k_grid < r)) {
+    if (isTRUE(verbose)) message("[gao_gca_cv] dropping k < r: ",
+                                 paste(k_grid[k_grid < r], collapse = ", "))
+    k_grid <- k_grid[k_grid >= r]
+  }
+  if (length(k_grid) < 1) stop("After filtering, k_grid is empty. Provide k values with r <= k <= p.")
+  
+  nK <- length(k_grid)
+  nL <- length(lambda_grid)
+  
   Mask <- make_mask_pp(pp)
+  
+  # --- CV loss helper: implemented like sgcar_cv_folds .cv_loss ---
+  .cv_loss_like_sgcar <- function(U_hat, S_va, B_va,
+                                  renorm_by_sigma0 = FALSE,
+                                  ridge_norm = 1e-8,
+                                  zero_loss_penalty = 1e8) {
+    if (anyNA(U_hat) || !all(is.finite(U_hat))) return(NA_real_)
+    
+    if (!isTRUE(renorm_by_sigma0)) {
+      # matches active sgcar line:
+      # return(-sum(diag(t(U_hat) %*% Sigma_val %*% U_hat)))
+      loss <- -as.numeric(sum(diag(t(U_hat) %*% S_va %*% U_hat)))
+    } else {
+      # matches commented sgcar line:
+      # -tr( (U^T Sigma0_val U)^(-1) (U^T Sigma_val U) )
+      N <- t(U_hat) %*% B_va %*% U_hat
+      N <- (N + t(N))/2
+      N <- N + ridge_norm * diag(ncol(N))
+      
+      M <- t(U_hat) %*% S_va %*% U_hat
+      M <- (M + t(M))/2
+      
+      val <- tryCatch(sum(diag(solve(N, M))), error = function(e) NA_real_)
+      loss <- -as.numeric(val)
+    }
+    
+    # match sgcar "C hit 0" penalty logic (loss==0 => bad)
+    if (is.finite(loss) && loss == 0) loss <- zero_loss_penalty
+    loss
+  }
   
   set.seed(seed)
   fold_id <- sample(rep(seq_len(nfold), length.out = n))
@@ -263,40 +311,60 @@ gao_gca_cv_init_and_final <- function(
                       nu = nu, epsilon = epsilon, maxiter = maxiter_admm),
       error = function(e) NULL
     )
+    
     if (is.null(ag)){
-      return(list(init_score = NA_real_,
-                  final_scores = rep(NA_real_, length(lambda_grid))))
+      return(list(
+        init_losses  = rep(NA_real_, nK),
+        final_losses = matrix(NA_real_, nrow = nK, ncol = nL,
+                              dimnames = list(k = as.character(k_grid),
+                                              lambda = as.character(lambda_grid)))
+      ))
     }
     
     ainit <- init_process(ag$Pi, r)
     
-    # init-only score
-    U0 <- hard(ainit, k)
-    U0_use <- if (isTRUE(renorm_by_sigma0)){
-      U0 %*% invsqrt_sym(t(U0) %*% B_va %*% U0, ridge = ridge_norm)
-    } else {
-      U0 %*% invsqrt_sym(t(U0) %*% B_tr %*% U0, ridge = ridge_norm)
-    }
-    init_score <- trace_obj(S_va, U0_use)
-    
-    # final scores across lambdas
-    final_scores <- vapply(lambda_grid, function(lam){
-      tryCatch({
-        U_tr <- sgca_tgd_safe(A = S_tr, B = B_tr, r = r, init = ainit, k = k,
-                              lambda = lam, eta = eta,
-                              convergence = convergence, maxiter = maxiter_tgd,
-                              ridge_norm = ridge_norm)
-        if (anyNA(U_tr)) return(NA_real_)
-        
-        U_use <- if (isTRUE(renorm_by_sigma0)){
-          U_tr %*% invsqrt_sym(t(U_tr) %*% B_va %*% U_tr, ridge = ridge_norm)
-        } else U_tr
-        
-        trace_obj(S_va, U_use)
-      }, error = function(e) NA_real_)
+    # ---- init-only losses across k (same loss logic) ----
+    init_losses <- vapply(seq_along(k_grid), function(ik){
+      kk <- k_grid[ik]
+      U0 <- hard(ainit, kk)
+      .cv_loss_like_sgcar(
+        U_hat = U0, S_va = S_va, B_va = B_va,
+        renorm_by_sigma0 = renorm_by_sigma0,
+        ridge_norm = ridge_norm,
+        zero_loss_penalty = zero_loss_penalty
+      )
     }, numeric(1))
     
-    list(init_score = init_score, final_scores = final_scores)
+    # ---- final losses across (k, lambda) ----
+    final_losses <- matrix(NA_real_, nrow = nK, ncol = nL,
+                           dimnames = list(k = as.character(k_grid),
+                                           lambda = as.character(lambda_grid)))
+    
+    for (ik in seq_along(k_grid)){
+      kk <- k_grid[ik]
+      for (il in seq_along(lambda_grid)){
+        lam <- lambda_grid[il]
+        
+        final_losses[ik, il] <- tryCatch({
+          U_tr <- sgca_tgd_safe(
+            A = S_tr, B = B_tr, r = r, init = ainit, k = kk,
+            lambda = lam, eta = eta,
+            convergence = convergence, maxiter = maxiter_tgd,
+            ridge_norm = ridge_norm
+          )
+          if (anyNA(U_tr)) return(NA_real_)
+          
+          .cv_loss_like_sgcar(
+            U_hat = U_tr, S_va = S_va, B_va = B_va,
+            renorm_by_sigma0 = renorm_by_sigma0,
+            ridge_norm = ridge_norm,
+            zero_loss_penalty = zero_loss_penalty
+          )
+        }, error = function(e) NA_real_)
+      }
+    }
+    
+    list(init_losses = init_losses, final_losses = final_losses)
   }
   
   # ---- run folds (parallel or sequential) ----
@@ -306,7 +374,6 @@ gao_gca_cv_init_and_final <- function(
   if (isTRUE(parallel) && nfold > 1 && ncores > 1) {
     nworkers <- min(as.integer(ncores), as.integer(nfold))
     
-    # choose cluster type safely
     type_eff <- cluster_type
     if (type_eff == "auto") {
       if (.Platform$OS.type == "windows" || Sys.getenv("RSTUDIO") == "1") {
@@ -317,31 +384,30 @@ gao_gca_cv_init_and_final <- function(
     }
     
     if (type_eff == "FORK" && .Platform$OS.type == "unix" && Sys.getenv("RSTUDIO") != "1") {
-      # forked apply
       fold_res <- tryCatch(
         parallel::mclapply(seq_len(nfold), fold_fun, mc.cores = nworkers),
         error = function(e) NULL
       )
       did_parallel <- !is.null(fold_res)
     } else {
-      # PSOCK
       cl <- tryCatch(parallel::makeCluster(nworkers, type = "PSOCK"),
                      error = function(e) NULL)
       if (!is.null(cl)) {
         on.exit(try(parallel::stopCluster(cl), silent = TRUE), add = TRUE)
         try(parallel::clusterSetRNGStream(cl, iseed = as.integer(seed)), silent = TRUE)
         
-        # Export everything needed by fold_fun
         parallel::clusterExport(
           cl,
-          varlist = c("X","pp","r","k","lambda_grid","rho_scale","nfold","eta",
+          varlist = c("X","pp","r","k_grid","lambda_grid","rho_scale","nfold","eta",
                       "ridge_B","ridge_norm","nu","epsilon","maxiter_admm",
                       "convergence","maxiter_tgd","renorm_by_sigma0","center",
-                      "Mask","fold_id",
+                      "Mask","fold_id","nK","nL","zero_loss_penalty",
                       # functions
                       "sqrtm_sym","invsqrt_sym","hard","init_process",
                       "Soft","updatePi","updateH","sgca_init_fixed","sgca_tgd_safe",
-                      "make_mask_pp","trace_obj","fold_fun"),
+                      "make_mask_pp",
+                      ".cv_loss_like_sgcar",
+                      "fold_fun"),
           envir = environment()
         )
         
@@ -353,8 +419,8 @@ gao_gca_cv_init_and_final <- function(
       }
     }
     
-    if (!did_parallel) {
-      if (isTRUE(verbose)) message("[gao_gca_cv] parallel failed -> running sequentially")
+    if (!did_parallel && isTRUE(verbose)) {
+      message("[gao_gca_cv] parallel failed -> running sequentially")
     }
   }
   
@@ -362,20 +428,48 @@ gao_gca_cv_init_and_final <- function(
     fold_res <- lapply(seq_len(nfold), fold_fun)
   }
   
-  # ---- aggregate ----
-  init_vec  <- vapply(fold_res, `[[`, numeric(1), "init_score")
-  final_mat <- do.call(rbind, lapply(fold_res, `[[`, "final_scores"))
+  # ---- aggregate init losses (over k) ----
+  init_mat <- do.call(rbind, lapply(fold_res, `[[`, "init_losses"))  # nfold x nK
+  colnames(init_mat) <- as.character(k_grid)
   
-  init_mean <- mean(init_vec, na.rm = TRUE)
-  init_sd   <- sd(init_vec, na.rm = TRUE)
+  init_mean <- colMeans(init_mat, na.rm = TRUE)
+  init_sd   <- apply(init_mat, 2, sd, na.rm = TRUE)
   
-  final_mean <- colMeans(final_mat, na.rm = TRUE)
-  final_sd   <- apply(final_mat, 2, sd, na.rm = TRUE)
+  # ---- aggregate final losses (over k, lambda) ----
+  final_arr <- array(NA_real_, dim = c(nfold, nK, nL),
+                     dimnames = list(fold = as.character(seq_len(nfold)),
+                                     k = as.character(k_grid),
+                                     lambda = as.character(lambda_grid)))
+  for (f in seq_len(nfold)) {
+    final_arr[f,,] <- fold_res[[f]]$final_losses
+  }
   
-  best_lambda_idx <- which.max(replace(final_mean, is.na(final_mean), -Inf))
+  ok_pair <- apply(final_arr, c(2,3), function(v) all(is.finite(v)))
+  final_mean <- apply(final_arr, c(2,3), function(v) mean(v, na.rm = TRUE))
+  final_sd   <- apply(final_arr, c(2,3), function(v) sd(v, na.rm = TRUE))
+  final_se   <- apply(final_arr, c(2,3), function(v) {
+    m <- sum(is.finite(v))
+    if (m <= 1) return(NA_real_)
+    stats::sd(v, na.rm = TRUE) / sqrt(m)
+  })
+  
+  # ---- choose best (k, lambda) by minimizing mean CV loss ----
+  mean_for_select <- final_mean
+  mean_for_select[!ok_pair | is.na(mean_for_select)] <- Inf
+  
+  if (!is.finite(min(mean_for_select))) {
+    stop("No (k, lambda) pair was successfully evaluated on all folds. Inspect solver settings / data.")
+  }
+  
+  best_idx <- which(mean_for_select == min(mean_for_select), arr.ind = TRUE)
+  best_k_idx <- best_idx[1, 1]
+  best_lambda_idx <- best_idx[1, 2]
+  
+  best_k <- k_grid[best_k_idx]
   best_lambda <- lambda_grid[best_lambda_idx]
+  best_loss <- final_mean[best_k_idx, best_lambda_idx]
   
-  # ---- refit on full data ----
+  # ---- refit on full data using best (k, lambda) ----
   Xfull <- if (isTRUE(center)) scale(X, center = TRUE, scale = FALSE) else X
   nfull <- nrow(Xfull)
   
@@ -390,29 +484,44 @@ gao_gca_cv_init_and_final <- function(
                              nu = nu, epsilon = epsilon, maxiter = maxiter_admm)
   ainit_full <- init_process(ag_full$Pi, r)
   
-  U_full_init <- hard(ainit_full, k)
+  # keep normalized full-data vectors for downstream use/interpretability
+  U_full_init <- hard(ainit_full, best_k)
   U_full_init <- U_full_init %*% invsqrt_sym(t(U_full_init) %*% B_full %*% U_full_init,
                                              ridge = ridge_norm)
   
-  U_full_final <- sgca_tgd_safe(A = S_full, B = B_full, r = r, init = ainit_full, k = k,
+  U_full_final <- sgca_tgd_safe(A = S_full, B = B_full, r = r, init = ainit_full, k = best_k,
                                 lambda = best_lambda, eta = eta,
                                 convergence = convergence, maxiter = maxiter_tgd,
                                 ridge_norm = ridge_norm)
   
   list(
     rho_scale = rho_scale,
+    renorm_by_sigma0 = renorm_by_sigma0,
     
-    # init-only CV
-    init_fold_scores = init_vec,
+    # grids
+    k_grid = k_grid,
+    lambda_grid = lambda_grid,
+    
+    # init-only CV losses over k
+    init_fold_losses = init_mat,   # nfold x nK
     init_mean = init_mean,
     init_sd = init_sd,
     
-    # final CV (lambda)
-    lambda_grid = lambda_grid,
-    final_fold_scores = final_mat,
-    final_mean = final_mean,
+    # final CV losses over (k, lambda)
+    final_fold_losses = final_arr, # nfold x nK x nL
+    final_mean = final_mean,       # nK x nL (mean loss)
     final_sd = final_sd,
+    final_se = final_se,
+    ok_pair = ok_pair,
+    
+    # selection (minimize loss)
+    k_min = best_k,
+    lambda_min = best_lambda,
+    best_k = best_k,
     best_lambda = best_lambda,
+    best_loss = best_loss,
+    best_k_idx = best_k_idx,
+    best_lambda_idx = best_lambda_idx,
     
     # full-data canonical vectors
     U_full_init = U_full_init,
@@ -422,3 +531,4 @@ gao_gca_cv_init_and_final <- function(
     did_parallel = did_parallel
   )
 }
+
